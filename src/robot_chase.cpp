@@ -3,14 +3,19 @@
 #include <memory>
 #include <thread>
 
+#include "geometry_msgs/msg/detail/pose__struct.hpp"
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "tf2/convert.h"
 #include "tf2_ros/transform_listener.h"
-#include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/buffer.h>
+
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 class RobotChase : public rclcpp::Node {
 public:
@@ -34,17 +39,11 @@ public:
     this->publisher_ = this->create_publisher<geometry_msgs::msg::Twist>(
         this->robot_catcher + "/cmd_vel", 10);
 
-    this->sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        this->robot_catcher + "/odom", 10,
-        std::bind(&RobotChase::odom_callback, this, _1));
-
     RCLCPP_INFO(this->get_logger(), "Robot_chase_node is up!");
   }
 
 private:
   geometry_msgs::msg::Twist robot_vel_;
-  geometry_msgs::msg::Pose2D current_pos_;
-
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
   geometry_msgs::msg::TransformStamped desired_pos_;
@@ -81,7 +80,6 @@ private:
     ts_.transform.rotation.w = 0.0;
 
     // Look up for the transformation between parent_frame and child_frame
-
     try {
       ts_ = tf_buffer_->lookupTransform(parent_frame, child_frame,
                                         tf2::TimePointZero);
@@ -91,171 +89,64 @@ private:
       return ts_;
     }
 
-    // Return desired pos
-
     return ts_;
   }
 
   void move_bot_to_coordinates() {
 
-    float threshold_ = 0.1;
-    float current_angle_ = 0.0;
     float desired_x_ = 0.0;
     float desired_y_ = 0.0;
-    float desired_angle_ = 0.0;
 
-    float target_angle_ = 0.0;
+    float error_distance_ = 0.0;
     float error_angle_ = 0.0;
-    float current_x_ = 0.0;
-    float current_y_ = 0.0;
 
-    RCLCPP_INFO(this->get_logger(), "Executing goal");
+    float threshold_position = 0.5;
+    float threshold_orientation = 0.02;
 
-    // Control loop
-    rclcpp::Rate loop_rate(10);
+    float kp_yaw = 0.75;
+    float kp_distance = 0.1;
+
+    // Get running robot data
+    this->get_desired_pos();
 
     // get data for control
-    current_x_ = this->current_pos_.x;
-    current_y_ = this->current_pos_.y;
     desired_x_ = this->desired_pos_.transform.translation.x;
     desired_y_ = this->desired_pos_.transform.translation.y;
-    current_angle_ = this->current_pos_.theta;
-    desired_angle_ = 0.0;
 
-    // desired_angle_ = this->desired_pos_.theta *
-    //                  0.01745; // Action input is given in degrees: *(2*PI /
-    //                  360)
+    // calculate errors
+    error_distance_ = sqrt(desired_x_ * desired_x_ + desired_y_ * desired_y_);
+    error_angle_ = std::atan2(desired_y_, desired_x_);
 
-    // Show in terminal
-    RCLCPP_INFO(this->get_logger(), "Current position: x: %f - y: %f",
-                current_x_, current_y_);
+    if (error_angle_ < -M_PI) {
+      error_angle_ += 2 * M_PI;
+    } else if (error_angle_ > M_PI) {
+      error_angle_ -= 2 * M_PI;
+    }
 
-    RCLCPP_INFO(this->get_logger(), "Desired position: x: %f - y: %f",
-                desired_x_, desired_y_);
-
-    RCLCPP_INFO(this->get_logger(), "Delta x: %f - Delta y: %f",
-                std::abs(current_x_ - desired_x_),
-                std::abs(current_y_ - desired_y_));
-
-    while (this->goal_reached(current_x_, current_y_, current_angle_,
-                              desired_x_, desired_y_, desired_angle_,
-                              threshold_) == false) {
+    if (abs(error_distance_) > threshold_position) {
 
       // If I reached position, start searching desired orientation
       // If not, continue searching position
 
-      if (this->pos_reached(current_x_, current_y_, desired_x_, desired_y_,
-                            threshold_) == false) {
+      if (abs(error_angle_) < threshold_orientation) {
 
-        target_angle_ =
-            std::atan2(desired_y_ - current_y_, desired_x_ - current_x_);
-
-        this->robot_vel_.linear.x = 0.2;
+        this->robot_vel_.linear.x = kp_distance * abs(error_distance_);
+        this->robot_vel_.angular.z = 0.0;
+        publisher_->publish(this->robot_vel_);
 
       } else {
-
-        target_angle_ = desired_angle_;
-        this->robot_vel_.linear.x = 0.0;
+        this->robot_vel_.linear.x = kp_distance * abs(error_distance_);
+        this->robot_vel_.angular.z = kp_yaw * error_angle_;
+        publisher_->publish(this->robot_vel_);
       }
 
-      // Calculate error and publish velocities
-      error_angle_ = target_angle_ - current_angle_;
-
-      if (error_angle_ < -M_PI) {
-        error_angle_ += 2 * M_PI;
-      } else if (error_angle_ > M_PI) {
-        error_angle_ -= 2 * M_PI;
-      }
-
-      this->robot_vel_.angular.z = error_angle_;
-      publisher_->publish(this->robot_vel_);
-
-      // Update data
-      current_x_ = this->current_pos_.x;
-      current_y_ = this->current_pos_.y;
-      current_angle_ = this->current_pos_.theta;
-
-      // Show in terminal
-      RCLCPP_INFO(this->get_logger(), "Current position: x: %f - y: %f",
-                  current_x_, current_y_);
-
-      RCLCPP_INFO(this->get_logger(), "Desired position: x: %f - y: %f",
-                  desired_x_, desired_y_);
-
-      RCLCPP_INFO(this->get_logger(), "Delta x: %f - Delta y: %f",
-                  std::abs(current_x_ - desired_x_),
-                  std::abs(current_y_ - desired_y_));
-
-      loop_rate.sleep();
-    }
-
-    // If goal is done
-    if (rclcpp::ok()) {
+    } else {
 
       // Stop robot
       this->robot_vel_.linear.x = 0.0;
       this->robot_vel_.angular.z = 0.0;
       publisher_->publish(this->robot_vel_);
-
-      // Send result
-      RCLCPP_INFO(this->get_logger(), "Goal succeeded");
     }
-  }
-
-  bool pos_reached(float current_x, float current_y, float desired_x,
-                   float desired_y, float threshold) {
-
-    if (std::abs(current_x - desired_x) < threshold) {
-      if (std::abs(current_y - desired_y) < threshold) {
-        RCLCPP_INFO(this->get_logger(), "Goal reached!");
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  bool goal_reached(float current_x, float current_y, float current_angle,
-                    float desired_x, float desired_y, float desired_angle,
-                    float threshold) {
-
-    if (pos_reached(current_x, current_y, desired_x, desired_y, threshold) ==
-        true) {
-      if (std::abs(current_angle - desired_angle) < threshold) {
-        RCLCPP_INFO(this->get_logger(), "Goal reached!");
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-
-    geometry_msgs::msg::Quaternion quaternion_;
-
-    double roll, pitch, yaw;
-
-    float x_;
-    float y_;
-
-    x_ = msg->pose.pose.position.x;
-    y_ = msg->pose.pose.position.y;
-    yaw = 0.0;
-    // Quaterion 2 Euler
-
-    quaternion_ = msg->pose.pose.orientation;
-
-    tf2::Quaternion tf_quaternion;
-    // tf2::fromMsg(quaternion_, tf_quaternion);
-    // tf2::fromMsg(quaternion_, tf_quaternion);
-    // tf2::Matrix3x3(tf_quaternion).getRPY(roll, pitch, yaw);
-
-    this->current_pos_.x = x_;
-    this->current_pos_.y = y_;
-    this->current_pos_.theta = yaw;
-
-    this->get_desired_pos();
   }
 
 }; // class GoToPose

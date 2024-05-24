@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -33,7 +34,7 @@ public:
 
     // control loop of 100 Hz
     this->timer_check_bot_pos_ = this->create_wall_timer(
-        std::chrono::milliseconds(100),
+        std::chrono::milliseconds(dT),
         std::bind(&RobotChase::move_bot_to_coordinates, this));
 
     this->publisher_ = this->create_publisher<geometry_msgs::msg::Twist>(
@@ -57,6 +58,9 @@ private:
 
   std::string parent_frame_;
   std::string child_frame_;
+
+  const int64_t dT = 100;
+  float integral_part = 0.0; 
 
   void get_desired_pos() {
 
@@ -100,12 +104,13 @@ private:
     float error_distance_ = 0.0;
     float error_angle_ = 0.0;
 
-    float threshold_position = 0.5;
+    float threshold_position = 0.36;
     float threshold_orientation = 0.02;
 
-    float kp_yaw = 0.75;
-    float kp_distance = 0.1;
-
+    float kp_yaw = 2;
+    float kp_distance = 0.5;
+    float kI = 0.05; 
+    
     // Get running robot data
     this->get_desired_pos();
 
@@ -130,23 +135,29 @@ private:
 
       if (abs(error_angle_) < threshold_orientation) {
 
-        this->robot_vel_.linear.x = kp_distance * abs(error_distance_);
+        this->robot_vel_.linear.x = kp_distance * abs(error_distance_) + kI*integral_part;
         this->robot_vel_.angular.z = 0.0;
         publisher_->publish(this->robot_vel_);
 
       } else {
-        this->robot_vel_.linear.x = kp_distance * abs(error_distance_);
-        this->robot_vel_.angular.z = kp_yaw * error_angle_;
+        this->robot_vel_.linear.x = kp_distance * abs(error_distance_) + kI*integral_part;
+        this->robot_vel_.angular.z = kp_yaw * error_angle_ + kI*integral_part * 0.1;
         publisher_->publish(this->robot_vel_);
       }
+
+      // Update integral Part
+      integral_part = integral_part + abs(error_distance_*(static_cast<float>(dT)/1000));
 
     } else {
 
       // Stop robot
+      integral_part = 0.0;
       this->robot_vel_.linear.x = 0.0;
       this->robot_vel_.angular.z = 0.0;
       publisher_->publish(this->robot_vel_);
     }
+
+    RCLCPP_INFO(this->get_logger(), "error_distance_: %f | integral_part: %f ", error_distance_, integral_part);
   }
 
 }; // class GoToPose
